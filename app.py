@@ -2,7 +2,6 @@ from sqlalchemy import create_engine, Column, Integer, String, Float, DateTime, 
 from sqlalchemy.orm import declarative_base, sessionmaker
 import csv
 import datetime
-import shutil
 
 # Create SQLite database engine
 engine = create_engine('sqlite:///inventory.db')
@@ -297,56 +296,114 @@ def add_choice():
 
 
 def view_analysis():
-    session = Session()
-    total_products = session.query(Product).count()
-    total_brands = session.query(Brand).count()
+    while True:
+        print('\nAnalysis Menu:')
+        print('1 - View summary (totals, most/least expensive, top brand)')
+        print('2 - Total inventory value')
+        print('3 - Low stock alerts')
+        print('Q - Return to main menu')
 
-    most_expensive = session.query(Product).order_by(Product.product_price.desc()).first()
-    least_expensive = session.query(Product).order_by(Product.product_price).first()
+        choice = input('Choose an option: ').strip().upper()
 
-    brand_counts = (
-        session.query(Brand.brand_name, func.count(Product.product_id).label('product_count'))
-        .join(Product, Product.brand_id == Brand.brand_id)
-        .group_by(Brand.brand_id)
-        .order_by(func.count(Product.product_id).desc())
-        .all()
-    )
+        if choice == '1':
+            session = Session()
+            total_products = session.query(Product).count()
+            total_brands = session.query(Brand).count()
 
-    print('Total brands:', total_brands)
-    print('Total products:', total_products)
+            most_expensive = session.query(Product).order_by(Product.product_price.desc()).first()
+            least_expensive = session.query(Product).order_by(Product.product_price).first()
 
-    if most_expensive:
-        print('\nMost expensive item:')
-        print('  Name:', most_expensive.product_name)
-        print('  Price:', most_expensive.product_price)
-        print('  Brand ID:', most_expensive.brand_id)
-    else:
-        print('\nMost expensive item: none')
+            brand_counts = (
+                session.query(Brand.brand_name, func.count(Product.product_id).label('product_count'))
+                .join(Product, Product.brand_id == Brand.brand_id)
+                .group_by(Brand.brand_id)
+                .order_by(func.count(Product.product_id).desc())
+                .all()
+            )
 
-    if least_expensive:
-        print('\nLeast expensive item:')
-        print('  Name:', least_expensive.product_name)
-        print('  Price:', least_expensive.product_price)
-        print('  Brand ID:', least_expensive.brand_id)
-    else:
-        print('\nLeast expensive item: none')
+            print('Total brands:', total_brands)
+            print('Total products:', total_products)
 
-    if brand_counts:
-        top_brand_name, top_product_count = brand_counts[0]
-        print('\nBrand with the most products:')
-        print('  Brand:', top_brand_name)
-        print('  Product count:', top_product_count)
-    else:
-        print('\nBrand with the most products: none')
+            if most_expensive:
+                print('\nMost expensive item:')
+                print('  Name:', most_expensive.product_name)
+                print('  Price:', most_expensive.product_price)
+                print('  Brand ID:', most_expensive.brand_id)
+            else:
+                print('\nMost expensive item: none')
 
-    session.close()
+            if least_expensive:
+                print('\nLeast expensive item:')
+                print('  Name:', least_expensive.product_name)
+                print('  Price:', least_expensive.product_price)
+                print('  Brand ID:', least_expensive.brand_id)
+            else:
+                print('\nLeast expensive item: none')
+
+            if brand_counts:
+                top_brand_name, top_product_count = brand_counts[0]
+                print('\nBrand with the most products:')
+                print('  Brand:', top_brand_name)
+                print('  Product count:', top_product_count)
+            else:
+                print('\nBrand with the most products: none')
+
+            session.close()
+
+        elif choice == '2':
+            session = Session()
+            total_value = session.query(func.sum(Product.product_price * Product.product_quantity)).scalar() or 0
+            print(f'Total inventory value: ${total_value:.2f}')
+            session.close()
+
+        elif choice == '3':
+            session = Session()
+            low_stock = session.query(Product).filter(Product.product_quantity < 10).all()
+            if low_stock:
+                print('Products with low stock (< 10 units):')
+                for p in low_stock:
+                    print(f'  {p.product_name}: {p.product_quantity} units')
+            else:
+                print('No products with low stock.')
+            session.close()
+
+        elif choice == 'Q':
+            break
+
+        else:
+            print('Invalid option.')
 
 
 def backup_database():
+    session = Session()
     timestamp = datetime.datetime.now().strftime('%Y%m%d_%H%M%S')
-    backup_name = f'inventory_backup_{timestamp}.db'
-    shutil.copy('inventory.db', backup_name)
-    print(f'Backup created: {backup_name}')
+
+    # Export brands table to CSV using the same header as brands.csv
+    brands_filename = f'brands_backup.csv'
+    with open(brands_filename, 'w', newline='') as csvfile:
+        writer = csv.writer(csvfile)
+        writer.writerow(['brand_name'])
+        for brand in session.query(Brand).order_by(Brand.brand_id).all():
+            writer.writerow([brand.brand_name])
+
+    # Export products table to CSV using the same header and formatting as inventory.csv
+    inventory_filename = f'inventory_backup.csv'
+    with open(inventory_filename, 'w', newline='') as csvfile:
+        writer = csv.writer(csvfile)
+        writer.writerow(['brand_name', 'product_name', 'product_price', 'product_quantity', 'date_updated'])
+        products = (
+            session.query(Product, Brand.brand_name)
+            .join(Brand, Product.brand_id == Brand.brand_id)
+            .order_by(Product.product_id)
+            .all()
+        )
+        for product, brand_name in products:
+            price_text = f'${product.product_price:.2f}'
+            date_text = product.date_updated.strftime('%m/%d/%Y')
+            writer.writerow([brand_name, product.product_name, price_text, product.product_quantity, date_text])
+
+    session.close()
+    print(f'CSV backup created: {brands_filename} and {inventory_filename}')
 
 
 def run_interaction():

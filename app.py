@@ -58,14 +58,27 @@ if __name__ == "__main__":
                 product_price = float(row['product_price'].strip('$'))
                 product_quantity = int(row['product_quantity'])
                 date_updated = datetime.datetime.strptime(row['date_updated'], '%m/%d/%Y')
-                product = Product(
-                    product_name=product_name,
-                    product_quantity=product_quantity,
-                    product_price=product_price,
-                    date_updated=date_updated,
-                    brand_id=brand.brand_id
-                )
-                session.add(product)
+                
+                # Check for existing product
+                existing_product = session.query(Product).filter_by(product_name=product_name).first()
+                if existing_product:
+                    # Update if the new data is more recent
+                    if date_updated > existing_product.date_updated:
+                        existing_product.product_quantity = product_quantity
+                        existing_product.product_price = product_price
+                        existing_product.date_updated = date_updated
+                        existing_product.brand_id = brand.brand_id
+                        print(f"Updated existing product: {product_name}")
+                else:
+                    # Create new product
+                    product = Product(
+                        product_name=product_name,
+                        product_quantity=product_quantity,
+                        product_price=product_price,
+                        date_updated=date_updated,
+                        brand_id=brand.brand_id
+                    )
+                    session.add(product)
             else:
                 print(f"Warning: Brand '{brand_name}' not found, skipping product '{row['product_name']}'")
     session.commit()

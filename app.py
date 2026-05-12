@@ -1,41 +1,37 @@
+from datetime import datetime
+from pathlib import Path
+import csv
+from typing import Optional
+
 from sqlalchemy import create_engine, Column, Integer, String, Float, DateTime, ForeignKey, func
 from sqlalchemy.orm import declarative_base, sessionmaker
-import csv
-import datetime
 
-# Create SQLite database engine
-engine = create_engine('sqlite:///inventory.db')
+# Constants
+DATA_DIR = Path('.')
+DATABASE_FILE = DATA_DIR / 'inventory.db'
+BRANDS_CSV = DATA_DIR / 'brands.csv'
+INVENTORY_CSV = DATA_DIR / 'inventory.csv'
+BRANDS_BACKUP_CSV = DATA_DIR / 'brands_backup.csv'
+INVENTORY_BACKUP_CSV = DATA_DIR / 'inventory_backup.csv'
+LOW_STOCK_THRESHOLD = 10
 
-# Create base class for models
+# Database setup
+engine = create_engine(f'sqlite:///{DATABASE_FILE}')
 Base = declarative_base()
+Session = sessionmaker(bind=engine)
 
 
-# Define Brand model
 class Brand(Base):
     __tablename__ = 'brands'
     brand_id = Column(Integer, primary_key=True)
     brand_name = Column(String, nullable=False, unique=True)
 
-
-def get_or_create_brand(session, brand_name):
-    normalized_name = brand_name.strip()
-    if not normalized_name:
-        return None
-
-    brand = session.query(Brand).filter(func.lower(Brand.brand_name) == normalized_name.lower()).first()
-    if brand:
-        return brand
-
-    brand = Brand(brand_name=normalized_name)
-    session.add(brand)
-    session.flush()
-    return brand
+    def __repr__(self) -> str:
+        return f'<Brand id={self.brand_id} name={self.brand_name!r}>'
 
 
-# Define Product model
 class Product(Base):
     __tablename__ = 'products'
-    
     product_id = Column(Integer, primary_key=True)
     product_name = Column(String, nullable=False)
     product_quantity = Column(Integer, nullable=False)
@@ -43,129 +39,267 @@ class Product(Base):
     date_updated = Column(DateTime, nullable=False)
     brand_id = Column(Integer, ForeignKey('brands.brand_id'), nullable=False)
 
+    def __repr__(self) -> str:
+        return (
+            f'<Product id={self.product_id} name={self.product_name!r} '
+            f'qty={self.product_quantity} price={self.product_price} date={self.date_updated} '
+            f'brand_id={self.brand_id}>'
+        )
 
-# Create session factory
-Session = sessionmaker(bind=engine)        
+
+# Utility helpers
+
+def normalize_text(value: str) -> str:
+    return value.strip()
 
 
-def view_product_details():
-    session = Session()
-    products = session.query(Product).order_by(Product.product_id).all()
+def format_price(value: float) -> str:
+    return f'${value:.2f}'
 
-    if not products:
-        print('No products available.')
-        session.close()
-        return
 
-    print('\nAvailable products:')
-    for product in products:
-        print(f"{product.product_id}: {product.product_name}")
+def format_date(value: datetime) -> str:
+    return value.strftime('%m/%d/%Y')
 
+
+def parse_int(value: str) -> Optional[int]:
+    try:
+        return int(value)
+    except ValueError:
+        return None
+
+
+def parse_float(value: str) -> Optional[float]:
+    try:
+        return float(value.replace('$', '').strip())
+    except ValueError:
+        return None
+
+
+def prompt_text(prompt: str, allow_empty: bool = False) -> str:
     while True:
-        user_input = input('\nEnter product ID to view, or type Q to return: ').strip()
-        if user_input.upper() == 'Q':
-            print('Returning to the main menu.')
-            session.close()
+        answer = input(prompt).strip()
+        if answer or allow_empty:
+            return answer
+        print('Entry cannot be empty.')
+
+
+def prompt_integer(prompt: str, allow_empty: bool = False) -> Optional[int]:
+    while True:
+        answer = input(prompt).strip()
+        if not answer and allow_empty:
+            return None
+        value = parse_int(answer)
+        if value is not None:
+            return value
+        print('Please enter a valid integer.')
+
+
+def prompt_choice(prompt: str, valid_choices: set[str]) -> str:
+    while True:
+        answer = input(prompt).strip().upper()
+        if answer in valid_choices:
+            return answer
+        print(f'Invalid option. Enter one of: {", ".join(sorted(valid_choices))}.')
+
+
+def get_brand_name(session, brand_id: int) -> str:
+    brand = session.query(Brand).filter_by(brand_id=brand_id).first()
+    return brand.brand_name if brand else 'Unknown'
+
+
+def get_brand_by_name(session, brand_name: str) -> Optional[Brand]:
+    normalized = normalize_text(brand_name)
+    return (
+        session.query(Brand)
+        .filter(func.lower(Brand.brand_name) == normalized.lower())
+        .first()
+    )
+
+
+def get_brand_by_id(session, brand_id: int) -> Optional[Brand]:
+    return session.query(Brand).filter_by(brand_id=brand_id).first()
+
+
+# Database import and initialization
+
+def create_tables() -> None:
+    Base.metadata.create_all(engine)
+
+
+def load_brands(session) -> None:
+    session.query(Brand).delete()
+    with BRANDS_CSV.open('r', newline='') as csvfile:
+        reader = csv.DictReader(csvfile)
+        for row in reader:
+            brand_name = normalize_text(row.get('brand_name', ''))
+            if not brand_name:
+                continue
+            if get_brand_by_name(session, brand_name) is None:
+                session.add(Brand(brand_name=brand_name))
+    session.commit()
+
+
+def load_products(session) -> None:
+    with INVENTORY_CSV.open('r', newline='') as csvfile:
+        reader = csv.DictReader(csvfile)
+        for row in reader:
+            brand_name = normalize_text(row.get('brand_name', ''))
+            product_name = normalize_text(row.get('product_name', ''))
+            product_price = parse_float(row.get('product_price', '0'))
+            product_quantity = parse_int(row.get('product_quantity', '0'))
+            date_text = normalize_text(row.get('date_updated', ''))
+
+            if not brand_name or not product_name or product_price is None or product_quantity is None or not date_text:
+                continue
+
+            brand = get_brand_by_name(session, brand_name)
+            if brand is None:
+                print(f"Warning: Brand '{brand_name}' not found, skipping product '{product_name}'.")
+                continue
+
+            try:
+                date_updated = datetime.strptime(date_text, '%m/%d/%Y')
+            except ValueError:
+                print(f"Warning: Invalid date '{date_text}' for product '{product_name}'.")
+                continue
+
+            existing_product = session.query(Product).filter_by(product_name=product_name).first()
+            if existing_product:
+                if date_updated > existing_product.date_updated:
+                    existing_product.product_quantity = product_quantity
+                    existing_product.product_price = product_price
+                    existing_product.date_updated = date_updated
+                    existing_product.brand_id = brand.brand_id
+                    print(f'Updated existing product: {product_name}')
+            else:
+                session.add(
+                    Product(
+                        product_name=product_name,
+                        product_quantity=product_quantity,
+                        product_price=product_price,
+                        date_updated=date_updated,
+                        brand_id=brand.brand_id,
+                    )
+                )
+    session.commit()
+
+
+def initialize_database() -> None:
+    create_tables()
+    with Session() as session:
+        load_brands(session)
+        load_products(session)
+
+
+# Product operations
+
+def display_product(product: Product, brand_name: str) -> None:
+    print('\nProduct details:')
+    print('Product ID:', product.product_id)
+    print('Name:', product.product_name)
+    print('Quantity:', product.product_quantity)
+    print('Price:', format_price(product.product_price))
+    print('Last updated:', format_date(product.date_updated))
+    print('Brand:', brand_name)
+
+
+def view_product_details() -> None:
+    with Session() as session:
+        products = session.query(Product).order_by(Product.product_id).all()
+        if not products:
+            print('No products available.')
             return
 
-        try:
-            product_id = int(user_input)
-        except ValueError:
-            print('Invalid entry. Please enter a numeric product ID or Q to quit.')
-            continue
-
-        product = session.query(Product).filter_by(product_id=product_id).first()
-        if not product:
-            print(f'No product with ID {product_id} found. Please try again.')
-            continue
+        print('\nAvailable products:')
+        for product in products:
+            print(f'{product.product_id}: {product.product_name}')
 
         while True:
-            brand = session.query(Brand).filter_by(brand_id=product.brand_id).first()
-            brand_name = brand.brand_name if brand else 'Unknown'
-
-            print('\nProduct details:')
-            print('Product ID:', product.product_id)
-            print('Name:', product.product_name)
-            print('Quantity:', product.product_quantity)
-            print('Price:', product.product_price)
-            print('Last updated:', product.date_updated)
-            print('Brand:', brand_name)
-
-            print('\nOptions for this product:')
-            print('E - Edit this product')
-            print('D - Delete this product')
-            print('R - Return to the main menu')
-
-            action = input('Choose an option: ').strip().upper()
-            if action == 'E':
-                edit_product(session, product)
-                break
-            elif action == 'D':
-                delete_product(session, product)
-                break
-            elif action == 'R':
+            user_input = prompt_text('\nEnter product ID to view, or type Q to return: ')
+            if user_input.upper() == 'Q':
                 print('Returning to the main menu.')
-                break
-            else:
-                print('Invalid option. Please choose E, D, or R.')
-        break
+                return
 
-    session.close()
+            product_id = parse_int(user_input)
+            if product_id is None:
+                print('Invalid entry. Please enter a numeric product ID or Q to quit.')
+                continue
+
+            product = session.query(Product).filter_by(product_id=product_id).first()
+            if product is None:
+                print(f'No product with ID {product_id} found. Please try again.')
+                continue
+
+            brand_name = get_brand_name(session, product.brand_id)
+            display_product(product, brand_name)
+
+            while True:
+                action = prompt_choice('Choose an option: (E)dit, (D)elete, (R)eturn: ', {'E', 'D', 'R'})
+                if action == 'E':
+                    edit_product(session, product)
+                    return
+                if action == 'D':
+                    delete_product(session, product)
+                    return
+                print('Returning to the main menu.')
+                return
 
 
-def edit_product(session, product):
+# Edit / delete
+
+def edit_product(session, product: Product) -> None:
     print('\nLeave a field blank to keep the current value.')
-    new_name = input(f'Product name [{product.product_name}]: ').strip()
-    new_price = input(f'Product price [{product.product_price}]: ').strip()
-    new_quantity = input(f'Product quantity [{product.product_quantity}]: ').strip()
+    new_name = prompt_text(f'Product name [{product.product_name}]: ', allow_empty=True)
+    new_price = prompt_text(f'Product price [{format_price(product.product_price)}]: ', allow_empty=True)
+    new_quantity = prompt_text(f'Product quantity [{product.product_quantity}]: ', allow_empty=True)
 
     if new_name:
         product.product_name = new_name
 
     if new_price:
-        try:
-            product.product_price = float(new_price.replace('$', ''))
-        except ValueError:
+        parsed_price = parse_float(new_price)
+        if parsed_price is not None:
+            product.product_price = parsed_price
+        else:
             print('Price not updated: invalid value.')
 
     if new_quantity:
-        try:
-            product.product_quantity = int(new_quantity)
-        except ValueError:
+        parsed_quantity = parse_int(new_quantity)
+        if parsed_quantity is not None:
+            product.product_quantity = parsed_quantity
+        else:
             print('Quantity not updated: invalid value.')
 
     brands = session.query(Brand).order_by(Brand.brand_id).all()
     if brands:
         print('\nAvailable brands:')
         for brand in brands:
-            print(f"{brand.brand_id}: {brand.brand_name}")
-        print(f"Current brand ID: {product.brand_id}")
-
+            print(f'{brand.brand_id}: {brand.brand_name}')
+        print(f'Current brand ID: {product.brand_id}')
         while True:
-            new_brand = input('Enter brand ID to assign, or leave blank to keep current: ').strip()
-            if not new_brand:
+            new_brand_id = prompt_text('Enter brand ID to assign, or leave blank to keep current: ', allow_empty=True)
+            if not new_brand_id:
                 break
-            try:
-                brand_id = int(new_brand)
-            except ValueError:
+            parsed_brand_id = parse_int(new_brand_id)
+            if parsed_brand_id is None:
                 print('Please enter a valid numeric brand ID or leave blank.')
                 continue
-
-            brand = session.query(Brand).filter_by(brand_id=brand_id).first()
-            if brand:
-                product.brand_id = brand_id
-                break
-            print(f'Brand ID {brand_id} not found. Please choose a valid brand ID.')
+            brand = get_brand_by_id(session, parsed_brand_id)
+            if brand is None:
+                print(f'Brand ID {parsed_brand_id} not found.')
+                continue
+            product.brand_id = brand.brand_id
+            break
     else:
         print('No brands are available to choose from.')
 
-    product.date_updated = datetime.datetime.now()
+    product.date_updated = datetime.now()
     session.commit()
     print('Product updated successfully.')
 
 
-def delete_product(session, product):
-    confirm = input(f'Are you sure you want to delete "{product.product_name}"? (Y/N): ').strip().upper()
+def delete_product(session, product: Product) -> None:
+    confirm = prompt_choice(f'Are you sure you want to delete "{product.product_name}"? (Y/N): ', {'Y', 'N'})
     if confirm == 'Y':
         session.delete(product)
         session.commit()
@@ -174,239 +308,178 @@ def delete_product(session, product):
         print('Delete cancelled.')
 
 
-def add_new_product():
-    session = Session()
+# Add operations
 
-    while True:
-        product_name = input('Product name: ').strip()
-        if not product_name:
-            print('Product name cannot be empty.')
-            continue
+def add_new_brand() -> None:
+    with Session() as session:
+        while True:
+            brand_name = prompt_text('Brand name: ')
+            if get_brand_by_name(session, brand_name) is None:
+                session.add(Brand(brand_name=brand_name))
+                session.commit()
+                print(f'Added new brand: {brand_name}')
+                return
+            print(f'Brand "{brand_name}" already exists. Please try again.')
 
+
+def add_new_product() -> None:
+    with Session() as session:
+        product_name = prompt_text('Product name: ')
         existing_product = session.query(Product).filter_by(product_name=product_name).first()
         if existing_product:
-            while True:
-                choice = input(f'Product "{product_name}" already exists. Edit existing product? (Y/N): ').strip().upper()
-                if choice == 'Y':
-                    edit_product(session, existing_product)
-                    session.close()
-                    return
-                if choice == 'N':
-                    print('Please enter a different product name.')
-                    break
-                print('Invalid option. Please enter Y or N.')
-            if choice == 'N':
-                continue
-        break
+            choice = prompt_choice(
+                f'Product "{product_name}" already exists. Edit existing product? (Y/N): ',
+                {'Y', 'N'},
+            )
+            if choice == 'Y':
+                edit_product(session, existing_product)
+                return
+            return
 
-    while True:
-        product_price_input = input('Product price (integer): ').strip()
-        try:
-            product_price = int(product_price_input)
-            break
-        except ValueError:
-            print('Please enter a valid integer for the price.')
+        product_price = None
+        while product_price is None:
+            product_price = parse_float(prompt_text('Product price: '))
+            if product_price is None:
+                print('Please enter a valid price.')
 
-    while True:
-        product_quantity_input = input('Product quantity (integer): ').strip()
-        try:
-            product_quantity = int(product_quantity_input)
-            break
-        except ValueError:
-            print('Please enter a valid integer for the quantity.')
+        product_quantity = prompt_integer('Product quantity: ')
+        brands = session.query(Brand).order_by(Brand.brand_id).all()
+        if not brands:
+            print('No brands are available. Please add brands first.')
+            return
 
-    date_updated = datetime.datetime.now()
+        print('\nAvailable brands:')
+        for brand in brands:
+            print(f'{brand.brand_id}: {brand.brand_name}')
 
-    brands = session.query(Brand).order_by(Brand.brand_id).all()
-    if not brands:
-        print('No brands are available. Please add brands first.')
-        session.close()
-        return
+        brand_id = None
+        while brand_id is None:
+            brand_id = prompt_integer('Enter brand ID: ')
+            if get_brand_by_id(session, brand_id) is None:
+                print(f'Brand ID {brand_id} does not exist.')
+                brand_id = None
 
-    print('\nAvailable brands:')
-    for brand in brands:
-        print(f"{brand.brand_id}: {brand.brand_name}")
-
-    while True:
-        brand_id_input = input('Enter brand ID: ').strip()
-        try:
-            brand_id = int(brand_id_input)
-        except ValueError:
-            print('Please enter a valid numeric brand ID.')
-            continue
-
-        brand = session.query(Brand).filter_by(brand_id=brand_id).first()
-        if not brand:
-            print(f'Brand ID {brand_id} does not exist. Please choose a valid brand ID.')
-            continue
-        break
-
-    product = Product(
-        product_name=product_name,
-        product_price=float(product_price),
-        product_quantity=product_quantity,
-        date_updated=date_updated,
-        brand_id=brand.brand_id,
-    )
-    session.add(product)
-    session.commit()
-    print(f"Added new product: {product_name}")
-    session.close()
+        session.add(
+            Product(
+                product_name=product_name,
+                product_price=product_price,
+                product_quantity=product_quantity,
+                date_updated=datetime.now(),
+                brand_id=brand_id,
+            )
+        )
+        session.commit()
+        print(f'Added new product: {product_name}')
 
 
-def add_new_brand():
-    session = Session()
-    while True:
-        brand_name = input('Brand name: ').strip()
-        if not brand_name:
-            print('Brand name cannot be empty.')
-            continue
-        existing_brand = session.query(Brand).filter(func.lower(Brand.brand_name) == brand_name.lower()).first()
-        if existing_brand:
-            print(f'Brand "{existing_brand.brand_name}" already exists with ID {existing_brand.brand_id}. Please try again.')
-            continue
-        break
-
-    brand = Brand(brand_name=brand_name)
-    session.add(brand)
-    session.commit()
-    print(f'Added new brand: {brand.brand_name} (ID {brand.brand_id})')
-    session.close()
-
-
-def add_choice():
+def add_menu() -> None:
     while True:
         print('\nAdd menu:')
         print('1 - Add a new product')
         print('2 - Add a new brand')
         print('Q - Return to the main menu')
 
-        choice = input('Enter your choice: ').strip().upper()
+        choice = prompt_choice('Enter your choice: ', {'1', '2', 'Q'})
         if choice == '1':
             add_new_product()
-            break
-        elif choice == '2':
+            return
+        if choice == '2':
             add_new_brand()
-            break
-        elif choice == 'Q':
-            print('Returning to the main menu.')
-            break
+            return
+        print('Returning to the main menu.')
+        return
+
+
+# Analysis and backup
+
+def view_analysis() -> None:
+    with Session() as session:
+        total_products = session.query(Product).count()
+        total_brands = session.query(Brand).count()
+
+        most_expensive = session.query(Product).order_by(Product.product_price.desc()).first()
+        least_expensive = session.query(Product).order_by(Product.product_price).first()
+
+        top_brand = (
+            session.query(Brand.brand_name, func.count(Product.product_id).label('product_count'))
+            .join(Product, Product.brand_id == Brand.brand_id)
+            .group_by(Brand.brand_id)
+            .order_by(func.count(Product.product_id).desc())
+            .first()
+        )
+
+        total_value = session.query(func.sum(Product.product_price * Product.product_quantity)).scalar() or 0
+        low_stock = session.query(Product).filter(Product.product_quantity < LOW_STOCK_THRESHOLD).all()
+
+        print('Total brands:', total_brands)
+        print('Total products:', total_products)
+        print(f'Total inventory value: {format_price(total_value)}')
+
+        if most_expensive:
+            print('\nMost expensive item:')
+            print('  Name:', most_expensive.product_name)
+            print('  Price:', format_price(most_expensive.product_price))
+            print('  Brand:', get_brand_name(session, most_expensive.brand_id))
         else:
-            print('Invalid option. Please enter 1, 2, or Q.')
+            print('\nMost expensive item: none')
+
+        if least_expensive:
+            print('\nLeast expensive item:')
+            print('  Name:', least_expensive.product_name)
+            print('  Price:', format_price(least_expensive.product_price))
+            print('  Brand:', get_brand_name(session, least_expensive.brand_id))
+        else:
+            print('\nLeast expensive item: none')
+
+        if top_brand:
+            print('\nBrand with the most products:')
+            print('  Brand:', top_brand.brand_name)
+            print('  Product count:', top_brand.product_count)
+        else:
+            print('\nBrand with the most products: none')
+
+        if low_stock:
+            print('\nProducts with low stock (< 10 units):')
+            for product in low_stock:
+                print(f'  {product.product_name}: {product.product_quantity} units')
+        else:
+            print('\nNo products with low stock.')
+
+        input('\nPress Enter to return to the main menu.')
 
 
-def view_analysis():
-    while True:
-        print('\nAnalysis Menu:')
-        print('1 - View summary (totals, most/least expensive, top brand)')
-        print('2 - Total inventory value')
-        print('3 - Low stock alerts')
-        print('Q - Return to main menu')
+def backup_database() -> None:
+    with Session() as session:
+        with BRANDS_BACKUP_CSV.open('w', newline='') as csvfile:
+            writer = csv.writer(csvfile)
+            writer.writerow(['brand_name'])
+            for brand in session.query(Brand).order_by(Brand.brand_id).all():
+                writer.writerow([brand.brand_name])
 
-        choice = input('Choose an option: ').strip().upper()
-
-        if choice == '1':
-            session = Session()
-            total_products = session.query(Product).count()
-            total_brands = session.query(Brand).count()
-
-            most_expensive = session.query(Product).order_by(Product.product_price.desc()).first()
-            least_expensive = session.query(Product).order_by(Product.product_price).first()
-
-            brand_counts = (
-                session.query(Brand.brand_name, func.count(Product.product_id).label('product_count'))
-                .join(Product, Product.brand_id == Brand.brand_id)
-                .group_by(Brand.brand_id)
-                .order_by(func.count(Product.product_id).desc())
+        with INVENTORY_BACKUP_CSV.open('w', newline='') as csvfile:
+            writer = csv.writer(csvfile)
+            writer.writerow(['brand_name', 'product_name', 'product_price', 'product_quantity', 'date_updated'])
+            products = (
+                session.query(Product, Brand.brand_name)
+                .join(Brand, Product.brand_id == Brand.brand_id)
+                .order_by(Product.product_id)
                 .all()
             )
+            for product, brand_name in products:
+                writer.writerow([
+                    brand_name,
+                    product.product_name,
+                    format_price(product.product_price),
+                    product.product_quantity,
+                    format_date(product.date_updated),
+                ])
 
-            print('Total brands:', total_brands)
-            print('Total products:', total_products)
-
-            if most_expensive:
-                print('\nMost expensive item:')
-                print('  Name:', most_expensive.product_name)
-                print('  Price:', most_expensive.product_price)
-                print('  Brand ID:', most_expensive.brand_id)
-            else:
-                print('\nMost expensive item: none')
-
-            if least_expensive:
-                print('\nLeast expensive item:')
-                print('  Name:', least_expensive.product_name)
-                print('  Price:', least_expensive.product_price)
-                print('  Brand ID:', least_expensive.brand_id)
-            else:
-                print('\nLeast expensive item: none')
-
-            if brand_counts:
-                top_brand_name, top_product_count = brand_counts[0]
-                print('\nBrand with the most products:')
-                print('  Brand:', top_brand_name)
-                print('  Product count:', top_product_count)
-            else:
-                print('\nBrand with the most products: none')
-
-            session.close()
-
-        elif choice == '2':
-            session = Session()
-            total_value = session.query(func.sum(Product.product_price * Product.product_quantity)).scalar() or 0
-            print(f'Total inventory value: ${total_value:.2f}')
-            session.close()
-
-        elif choice == '3':
-            session = Session()
-            low_stock = session.query(Product).filter(Product.product_quantity < 10).all()
-            if low_stock:
-                print('Products with low stock (< 10 units):')
-                for p in low_stock:
-                    print(f'  {p.product_name}: {p.product_quantity} units')
-            else:
-                print('No products with low stock.')
-            session.close()
-
-        elif choice == 'Q':
-            break
-
-        else:
-            print('Invalid option.')
+    print(f'CSV backup created: {BRANDS_BACKUP_CSV.name} and {INVENTORY_BACKUP_CSV.name}')
 
 
-def backup_database():
-    session = Session()
-    timestamp = datetime.datetime.now().strftime('%Y%m%d_%H%M%S')
+# Main interaction
 
-    # Export brands table to CSV using the same header as brands.csv
-    brands_filename = f'brands_backup.csv'
-    with open(brands_filename, 'w', newline='') as csvfile:
-        writer = csv.writer(csvfile)
-        writer.writerow(['brand_name'])
-        for brand in session.query(Brand).order_by(Brand.brand_id).all():
-            writer.writerow([brand.brand_name])
-
-    # Export products table to CSV using the same header and formatting as inventory.csv
-    inventory_filename = f'inventory_backup.csv'
-    with open(inventory_filename, 'w', newline='') as csvfile:
-        writer = csv.writer(csvfile)
-        writer.writerow(['brand_name', 'product_name', 'product_price', 'product_quantity', 'date_updated'])
-        products = (
-            session.query(Product, Brand.brand_name)
-            .join(Brand, Product.brand_id == Brand.brand_id)
-            .order_by(Product.product_id)
-            .all()
-        )
-        for product, brand_name in products:
-            price_text = f'${product.product_price:.2f}'
-            date_text = product.date_updated.strftime('%m/%d/%Y')
-            writer.writerow([brand_name, product.product_name, price_text, product.product_quantity, date_text])
-
-    session.close()
-    print(f'CSV backup created: {brands_filename} and {inventory_filename}')
-
-
-def run_interaction():
+def run_interaction() -> None:
     while True:
         print('\nChoose an option:')
         print('V - View single product details')
@@ -415,77 +488,26 @@ def run_interaction():
         print('B - Backup the database')
         print('Q - Quit')
 
-        choice = input('Enter your choice: ').strip().upper()
+        choice = prompt_choice('Enter your choice: ', {'V', 'N', 'A', 'B', 'Q'})
         if choice == 'V':
             view_product_details()
         elif choice == 'N':
-            add_choice()
+            add_menu()
         elif choice == 'A':
             view_analysis()
         elif choice == 'B':
             backup_database()
-        elif choice == 'Q':
+        else:
             print('Quitting.')
             break
-        else:
-            print('Invalid option. Please enter V, N, A, B, or Q.')
 
 
-if __name__ == "__main__":
-    Base.metadata.create_all(engine)
-    print("Database initialized: inventory.db")
-    
-    # Reset brands and import from brands.csv
-    session = Session()
-    session.query(Brand).delete()
-    session.commit()
-
-    with open('brands.csv', 'r') as file:
-        reader = csv.DictReader(file)
-        for row in reader:
-            if row.get('brand_name'):
-                get_or_create_brand(session, row['brand_name'])
-    session.commit()
-   
-    
-    # Import products from inventory CSV
-    with open('inventory.csv', 'r') as file:
-        reader = csv.DictReader(file)
-        for row in reader:
-            brand_name = row['brand_name']
-            brand = session.query(Brand).filter(func.lower(Brand.brand_name) == brand_name.strip().lower()).first()
-            if brand:
-                product_name = row['product_name']
-                product_price = float(row['product_price'].strip('$'))
-                product_quantity = int(row['product_quantity'])
-                date_updated = datetime.datetime.strptime(row['date_updated'], '%m/%d/%Y')
-                
-                # Check for existing product
-                existing_product = session.query(Product).filter_by(product_name=product_name).first()
-                if existing_product:
-                    # Update if the new data is more recent
-                    if date_updated > existing_product.date_updated:
-                        existing_product.product_quantity = product_quantity
-                        existing_product.product_price = product_price
-                        existing_product.date_updated = date_updated
-                        existing_product.brand_id = brand.brand_id
-                        print(f"Updated existing product: {product_name}")
-                else:
-                    # Create new product
-                    product = Product(
-                        product_name=product_name,
-                        product_quantity=product_quantity,
-                        product_price=product_price,
-                        date_updated=date_updated,
-                        brand_id=brand.brand_id
-                    )
-                    session.add(product)
-            else:
-                print(f"Warning: Brand '{brand_name}' not found, skipping product '{row['product_name']}'")
-    session.commit()
-    print("Products imported from inventory.csv")
-    session.close()
-
+def main() -> None:
+    create_tables()
+    print(f'Database initialized: {DATABASE_FILE.name}')
+    initialize_database()
     run_interaction()
 
 
+if __name__ == '__main__':
+    main()

@@ -34,6 +34,7 @@ class Product(Base):
     __tablename__ = 'products'
     product_id = Column(Integer, primary_key=True)
     product_name = Column(String, nullable=False)
+    product_department = Column(String, nullable=False)
     product_quantity = Column(Integer, nullable=False)
     product_price = Column(Float, nullable=False)
     date_updated = Column(DateTime, nullable=False)
@@ -145,11 +146,12 @@ def load_products(session) -> None:
         for row in reader:
             brand_name = normalize_text(row.get('brand_name', ''))
             product_name = normalize_text(row.get('product_name', ''))
+            product_department = normalize_text(row.get('product_department', ''))
             product_price = parse_float(row.get('product_price', '0'))
             product_quantity = parse_int(row.get('product_quantity', '0'))
             date_text = normalize_text(row.get('date_updated', ''))
 
-            if not brand_name or not product_name or product_price is None or product_quantity is None or not date_text:
+            if not brand_name or not product_name or not product_department or product_price is None or product_quantity is None or not date_text:
                 continue
 
             brand = get_brand_by_name(session, brand_name)
@@ -168,6 +170,7 @@ def load_products(session) -> None:
                 if date_updated > existing_product.date_updated:
                     existing_product.product_quantity = product_quantity
                     existing_product.product_price = product_price
+                    existing_product.product_department = product_department
                     existing_product.date_updated = date_updated
                     existing_product.brand_id = brand.brand_id
                     print(f'Updated existing product: {product_name}')
@@ -175,6 +178,7 @@ def load_products(session) -> None:
                 session.add(
                     Product(
                         product_name=product_name,
+                        product_department=product_department,
                         product_quantity=product_quantity,
                         product_price=product_price,
                         date_updated=date_updated,
@@ -197,6 +201,7 @@ def display_product(product: Product, brand_name: str) -> None:
     print('\nProduct details:')
     print('Product ID:', product.product_id)
     print('Name:', product.product_name)
+    print('Department:', product.product_department)
     print('Quantity:', product.product_quantity)
     print('Price:', format_price(product.product_price))
     print('Last updated:', format_date(product.date_updated))
@@ -250,11 +255,15 @@ def view_product_details() -> None:
 def edit_product(session, product: Product) -> None:
     print('\nLeave a field blank to keep the current value.')
     new_name = prompt_text(f'Product name [{product.product_name}]: ', allow_empty=True)
+    new_department = prompt_text(f'Product department [{product.product_department}]: ', allow_empty=True)
     new_price = prompt_text(f'Product price [{format_price(product.product_price)}]: ', allow_empty=True)
     new_quantity = prompt_text(f'Product quantity [{product.product_quantity}]: ', allow_empty=True)
 
     if new_name:
         product.product_name = new_name
+
+    if new_department:
+        product.product_department = new_department
 
     if new_price:
         parsed_price = parse_float(new_price)
@@ -336,6 +345,8 @@ def add_new_product() -> None:
                 return
             return
 
+        product_department = prompt_text('Product department: ')
+
         product_price = None
         while product_price is None:
             product_price = parse_float(prompt_text('Product price: '))
@@ -362,6 +373,7 @@ def add_new_product() -> None:
         session.add(
             Product(
                 product_name=product_name,
+                product_department=product_department,
                 product_price=product_price,
                 product_quantity=product_quantity,
                 date_updated=datetime.now(),
@@ -408,6 +420,20 @@ def view_analysis() -> None:
             .first()
         )
 
+        top_department = (
+            session.query(Product.product_department, func.count(Product.product_id).label('product_count'))
+            .group_by(Product.product_department)
+            .order_by(func.count(Product.product_id).desc())
+            .first()
+        )
+
+        dept_values = (
+            session.query(Product.product_department, func.sum(Product.product_price * Product.product_quantity).label('total_value'))
+            .group_by(Product.product_department)
+            .order_by(func.sum(Product.product_price * Product.product_quantity).desc())
+            .all()
+        )
+
         total_value = session.query(func.sum(Product.product_price * Product.product_quantity)).scalar() or 0
         low_stock = session.query(Product).filter(Product.product_quantity < LOW_STOCK_THRESHOLD).all()
 
@@ -438,6 +464,20 @@ def view_analysis() -> None:
         else:
             print('\nBrand with the most products: none')
 
+        if top_department:
+            print('\nDepartment with the most products:')
+            print('  Department:', top_department.product_department)
+            print('  Product count:', top_department.product_count)
+        else:
+            print('\nDepartment with the most products: none')
+
+        if dept_values:
+            print('\nInventory value by department:')
+            for dept, value in dept_values:
+                print(f'  {dept}: {format_price(value)}')
+        else:
+            print('\nInventory value by department: none')
+
         if low_stock:
             print('\nProducts with low stock (< 10 units):')
             for product in low_stock:
@@ -458,7 +498,7 @@ def backup_database() -> None:
 
         with INVENTORY_BACKUP_CSV.open('w', newline='') as csvfile:
             writer = csv.writer(csvfile)
-            writer.writerow(['brand_name', 'product_name', 'product_price', 'product_quantity', 'date_updated'])
+            writer.writerow(['brand_name', 'product_name', 'product_department', 'product_price', 'product_quantity', 'date_updated'])
             products = (
                 session.query(Product, Brand.brand_name)
                 .join(Brand, Product.brand_id == Brand.brand_id)
@@ -469,6 +509,7 @@ def backup_database() -> None:
                 writer.writerow([
                     brand_name,
                     product.product_name,
+                    product.product_department,
                     format_price(product.product_price),
                     product.product_quantity,
                     format_date(product.date_updated),

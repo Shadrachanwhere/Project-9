@@ -12,7 +12,7 @@
 _List all the AI tools you utilized to complete the project._
 
 - _(AI Tool One)_ Github copilot
-- _(AI Tool Two)_
+- _(AI Tool Two)_ Claude ai
 - _(AI Tool Three)_
 
 ---

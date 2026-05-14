@@ -254,7 +254,14 @@ def view_product_details() -> None:
 
 def edit_product(session, product: Product) -> None:
     print('\nLeave a field blank to keep the current value.')
-    new_name = prompt_text(f'Product name [{product.product_name}]: ', allow_empty=True)
+    while True:
+        raw = input(f'Product name [{product.product_name}]: ')
+        new_name = raw.strip()
+        if raw == '':
+            break
+        if new_name:
+            break
+        print('Product name cannot be blank. Leave the field empty to keep the current value.')
     new_department = prompt_text(f'Product department [{product.product_department}]: ', allow_empty=True)
     new_price = prompt_text(f'Product price [{format_price(product.product_price)}]: ', allow_empty=True)
     new_quantity = prompt_text(f'Product quantity [{product.product_quantity}]: ', allow_empty=True)

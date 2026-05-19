@@ -1,9 +1,9 @@
-from datetime import datetime
+from datetime import datetime,date
 from pathlib import Path
 import csv
 from typing import Optional
 
-from sqlalchemy import create_engine, Column, Integer, String, Float, DateTime, ForeignKey, func
+from sqlalchemy import create_engine, Column, Integer, String, Date, ForeignKey, func
 from sqlalchemy.orm import declarative_base, sessionmaker
 
 # Constants
@@ -36,8 +36,8 @@ class Product(Base):
     product_name = Column(String, nullable=False)
     product_department = Column(String, nullable=False)
     product_quantity = Column(Integer, nullable=False)
-    product_price = Column(Float, nullable=False)
-    date_updated = Column(DateTime, nullable=False)
+    product_price = Column(Integer, nullable=False)
+    date_updated = Column(Date, nullable=False)
     brand_id = Column(Integer, ForeignKey('brands.brand_id'), nullable=False)
 
     def __repr__(self) -> str:
@@ -54,8 +54,8 @@ def normalize_text(value: str) -> str:
     return value.strip()
 
 
-def format_price(value: float) -> str:
-    return f'${value:.2f}'
+def format_price(value: int) -> str:
+    return f'${value / 100:.2f}'
 
 
 def format_date(value: datetime) -> str:
@@ -74,6 +74,13 @@ def parse_float(value: str) -> Optional[float]:
         return float(value.replace('$', '').strip())
     except ValueError:
         return None
+
+
+def parse_price(value: str) -> Optional[int]:
+    parsed = parse_float(value)
+    if parsed is None:
+        return None
+    return round(parsed * 100)
 
 
 def prompt_text(prompt: str, allow_empty: bool = False) -> str:
@@ -147,7 +154,7 @@ def load_products(session) -> None:
             brand_name = normalize_text(row.get('brand_name', ''))
             product_name = normalize_text(row.get('product_name', ''))
             product_department = normalize_text(row.get('product_department', ''))
-            product_price = parse_float(row.get('product_price', '0'))
+            product_price = parse_price(row.get('product_price', '0'))
             product_quantity = parse_int(row.get('product_quantity', '0'))
             date_text = normalize_text(row.get('date_updated', ''))
 
@@ -160,7 +167,7 @@ def load_products(session) -> None:
                 continue
 
             try:
-                date_updated = datetime.strptime(date_text, '%m/%d/%Y')
+                date_updated = datetime.strptime(date_text, '%m/%d/%Y').date()
             except ValueError:
                 print(f"Warning: Invalid date '{date_text}' for product '{product_name}'.")
                 continue
@@ -273,7 +280,7 @@ def edit_product(session, product: Product) -> None:
         product.product_department = new_department
 
     if new_price:
-        parsed_price = parse_float(new_price)
+        parsed_price = parse_price(new_price)
         if parsed_price is not None:
             product.product_price = parsed_price
         else:
@@ -309,7 +316,7 @@ def edit_product(session, product: Product) -> None:
     else:
         print('No brands are available to choose from.')
 
-    product.date_updated = datetime.now()
+    product.date_updated = datetime.now().date()
     session.commit()
     print('Product updated successfully.')
 
@@ -356,7 +363,7 @@ def add_new_product() -> None:
 
         product_price = None
         while product_price is None:
-            product_price = parse_float(prompt_text('Product price: '))
+            product_price = parse_price(prompt_text('Product price: '))
             if product_price is None:
                 print('Please enter a valid price.')
 
@@ -383,7 +390,7 @@ def add_new_product() -> None:
                 product_department=product_department,
                 product_price=product_price,
                 product_quantity=product_quantity,
-                date_updated=datetime.now(),
+                date_updated=datetime.now().date(),
                 brand_id=brand_id,
             )
         )
